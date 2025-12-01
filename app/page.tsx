@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import * as Ably from "ably";
 import * as Tone from "tone";
 import { nanoid } from "nanoid";
@@ -248,9 +248,120 @@ function HomeLoading() {
   );
 }
 
+// Generate a session ID - 8 chars for URLs
+const generateSessionId = () => nanoid(8);
+
+function LandingPage() {
+  const router = useRouter();
+  const [joinCode, setJoinCode] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+
+  const createSession = () => {
+    setIsCreating(true);
+    const newSessionId = generateSessionId();
+    router.push(`/?session=${newSessionId}`);
+  };
+
+  const joinSession = (e: React.FormEvent) => {
+    e.preventDefault();
+    const code = joinCode.trim();
+    if (code) {
+      // Handle both full URLs and just the session code
+      const match = code.match(/[?&]session=([^&]+)/);
+      const sessionId = match ? match[1] : code;
+      router.push(`/?session=${sessionId}`);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="w-full max-w-md">
+        <div className="card p-8">
+          {/* Logo/Header */}
+          <div className="flex flex-col items-center mb-8">
+            <div className="h-16 w-16 rounded-2xl border-3 border-[#0a0a0d] bg-gradient-to-br from-[#ffb300] via-[#ff5e6c] to-[#4f7bff] shadow-[0_4px_0_#0a0a0d] mb-4" />
+            <h1 className="text-2xl font-bold tracking-tight">Loop Relay</h1>
+            <p className="text-sm text-neutral-500 mt-1">Collaborative music, one loop at a time</p>
+          </div>
+
+          {/* Create Session */}
+          <button
+            onClick={createSession}
+            disabled={isCreating}
+            className="w-full card bg-gradient-to-r from-[#ffb300] to-[#ff5e6c] px-6 py-4 text-center font-bold text-lg transition hover:translate-y-[-2px] hover:shadow-[0px_8px_0px_#0a0a0d] disabled:opacity-70"
+          >
+            {isCreating ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                Creating...
+              </span>
+            ) : (
+              "🎵 Start New Session"
+            )}
+          </button>
+
+          <div className="flex items-center gap-4 my-6">
+            <div className="h-px flex-1 bg-neutral-300" />
+            <span className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">or join existing</span>
+            <div className="h-px flex-1 bg-neutral-300" />
+          </div>
+
+          {/* Join Session */}
+          <form onSubmit={joinSession} className="space-y-3">
+            <input
+              type="text"
+              value={joinCode}
+              onChange={(e) => setJoinCode(e.target.value)}
+              placeholder="Paste session link or code..."
+              className="w-full rounded-xl border-2 border-neutral-900 px-4 py-3 text-sm font-medium placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-[#4f7bff] focus:ring-offset-2"
+            />
+            <button
+              type="submit"
+              disabled={!joinCode.trim()}
+              className="w-full pill bg-[#4f7bff] px-6 py-3 text-sm font-bold text-white transition hover:bg-[#3d69e8] disabled:bg-neutral-300 disabled:text-neutral-500"
+            >
+              Join Session →
+            </button>
+          </form>
+
+          {/* Info */}
+          <div className="mt-8 rounded-xl bg-neutral-100 p-4 text-xs text-neutral-600 space-y-2">
+            <div className="flex items-start gap-2">
+              <span className="text-[#ffb300]">⬤</span>
+              <span>Create a session and share the link with friends</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-[#45d4e5]">⬤</span>
+              <span>Take turns building loops together in real-time</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-[#6ef3b7]">⬤</span>
+              <span>Session creator controls playback and can manage participants</span>
+            </div>
+          </div>
+        </div>
+
+        <p className="text-center text-[10px] text-neutral-400 mt-4">
+          Built with Tone.js & Ably • No account required
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function HomeContent() {
   const searchParams = useSearchParams();
-  const sessionId = searchParams.get("session") ?? "main";
+  const sessionId = searchParams.get("session");
+
+  // No session ID = show landing page
+  if (!sessionId) {
+    return <LandingPage />;
+  }
+
+  return <SessionView sessionId={sessionId} />;
+}
+
+function SessionView({ sessionId }: { sessionId: string }) {
 
   const initialIdentity: Identity = useMemo(
     () => ({
@@ -322,6 +433,23 @@ function HomeContent() {
   const [turnRemaining, setTurnRemaining] = useState(0);
   const [stateLoaded, setStateLoaded] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [wasKicked, setWasKicked] = useState(false);
+  const router = useRouter();
+
+  const sessionLink = typeof window !== "undefined" 
+    ? `${window.location.origin}/?session=${sessionId}` 
+    : "";
+
+  const copySessionLink = async () => {
+    try {
+      await navigator.clipboard.writeText(sessionLink);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy link", err);
+    }
+  };
 
   const ablyRef = useRef<Ably.Realtime | null>(null);
   const channelRef = useRef<Ably.RealtimeChannel | null>(null);
@@ -520,6 +648,17 @@ function HomeContent() {
             setSessionState(incoming);
             sessionStateRef.current = incoming;
             setStateLoaded(true);
+          }
+        });
+
+        // Listen for kick messages
+        channel.subscribe("kick", (msg) => {
+          const kickedUserId = msg.data?.userId;
+          if (kickedUserId === identityRef.current.id) {
+            setWasKicked(true);
+            // Leave the session
+            channel.presence.leave();
+            channel.detach();
           }
         });
 
@@ -1244,6 +1383,52 @@ function HomeContent() {
     });
   }, [sessionState.creatorId, identity.id, isLeader]);
 
+  // Kick a user from session (admin only)
+  const kickUser = useCallback((userId: string) => {
+    const isAdmin = sessionState.creatorId === identity.id;
+    if (!isAdmin) return;
+    if (userId === identity.id) return; // Can't kick yourself
+    
+    // Send kick message
+    channelRef.current?.publish("kick", { userId }).catch((err) => {
+      console.error("Failed to kick user", err);
+    });
+    
+    // Remove any loops by this user
+    const now = Date.now();
+    const updatedLoops = sessionStateRef.current.loops.filter((l) => l.userId !== userId);
+    
+    // If the kicked user was the active turn holder, move to next
+    let nextTurn = sessionStateRef.current.activeTurn;
+    if (nextTurn?.userId === userId) {
+      const queueIds = queue.map((p) => p.id).filter((id) => id !== userId);
+      if (queueIds.length) {
+        const nextId = queueIds[0];
+        nextTurn = {
+          userId: nextId,
+          startedAt: now,
+          endsAt: now + compositionWindowMs,
+        };
+      } else {
+        nextTurn = null;
+      }
+    }
+    
+    publishState({
+      ...sessionStateRef.current,
+      loops: updatedLoops,
+      activeTurn: nextTurn,
+      version: now,
+    });
+  }, [sessionState.creatorId, identity.id, queue, compositionWindowMs]);
+
+  // Exit session and go back to landing
+  const exitSession = useCallback(() => {
+    channelRef.current?.presence.leave();
+    channelRef.current?.detach();
+    router.push("/");
+  }, [router]);
+
   const nowPlayingLabel = () => {
     if (!sessionState.activeTurn) return "Waiting";
     const active = queue.find((p) => p.id === sessionState.activeTurn?.userId);
@@ -1251,6 +1436,28 @@ function HomeContent() {
   };
 
   const stepSquares = Array.from({ length: STEP_COUNT });
+  const isAdmin = sessionState.creatorId === identity.id;
+
+  // Show kicked screen
+  if (wasKicked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4">
+        <div className="card p-8 text-center max-w-sm">
+          <div className="text-4xl mb-4">🚫</div>
+          <h2 className="text-xl font-bold mb-2">Removed from Session</h2>
+          <p className="text-sm text-neutral-500 mb-6">
+            The session admin has removed you from this session.
+          </p>
+          <button
+            onClick={() => router.push("/")}
+            className="pill bg-[#4f7bff] px-6 py-2 text-sm font-semibold text-white"
+          >
+            Back to Home
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="px-4 py-4 lg:px-6">
@@ -1310,9 +1517,27 @@ function HomeContent() {
                   </div>
                 </>
               )}
-              <div className="pill bg-white px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-700">
+              <button
+                onClick={copySessionLink}
+                className={clsx(
+                  "pill px-3 py-1.5 text-[10px] font-semibold transition",
+                  linkCopied
+                    ? "bg-[#6ef3b7] text-neutral-900"
+                    : "bg-white text-neutral-700 hover:bg-neutral-100"
+                )}
+              >
+                {linkCopied ? "✓ Copied!" : "📋 Copy Link"}
+              </button>
+              <div className="pill bg-white px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-700 flex items-center gap-1.5">
+                {isAdmin && <span className="text-[#ffb300]">★</span>}
                 {sessionId}
               </div>
+              <button
+                onClick={exitSession}
+                className="pill bg-neutral-200 px-3 py-1.5 text-[10px] font-semibold text-neutral-600 hover:bg-neutral-300 transition"
+              >
+                Exit
+              </button>
             </div>
           </div>
           {connectionError && (
@@ -1342,7 +1567,7 @@ function HomeContent() {
                   <div
                     key={person.id}
                     className={clsx(
-                      "flex items-center justify-between rounded-md border-2 px-2 py-1.5",
+                      "group flex items-center justify-between rounded-md border-2 px-2 py-1.5",
                       person.id === sessionState.activeTurn?.userId
                         ? "border-[#4f7bff] bg-[#eef1ff]"
                         : "border-neutral-200 bg-white"
@@ -1353,13 +1578,26 @@ function HomeContent() {
                         className="h-2.5 w-2.5 rounded-full"
                         style={{ backgroundColor: person.color }}
                       />
-                      <p className="text-xs font-semibold">{person.name}</p>
+                      <p className="text-xs font-semibold truncate max-w-[100px]">{person.name}</p>
                       {person.id === identity.id && (
                         <span className="pill bg-neutral-900 px-1.5 py-0.5 text-[9px] font-semibold text-white">
                           you
                         </span>
                       )}
+                      {person.id === sessionState.creatorId && (
+                        <span className="text-[#ffb300] text-[10px]" title="Session Admin">★</span>
+                      )}
                     </div>
+                    {/* Kick button - only for admin and not for self */}
+                    {isAdmin && person.id !== identity.id && (
+                      <button
+                        onClick={() => kickUser(person.id)}
+                        className="h-5 w-5 flex items-center justify-center rounded bg-transparent hover:bg-[#ff5e6c] text-[#ff5e6c] hover:text-white text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-all"
+                        title="Remove from session"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
