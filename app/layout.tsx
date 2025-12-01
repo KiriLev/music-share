@@ -18,7 +18,7 @@ const mono = DM_Mono({
 export const metadata: Metadata = {
   title: "Loop Relay | Collaborative Music Builder",
   description:
-    "Turn-based, collaborative loop builder inspired by Teenage Engineering — compose drums, keys, and bass together in real-time.",
+    "Turn-based, collaborative loop builder — compose drums, keys, and bass together in real-time.",
 };
 
 export default function RootLayout({
