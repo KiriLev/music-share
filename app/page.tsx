@@ -43,6 +43,7 @@ type SessionState = {
   version: number;
   creatorId: string | null;
   windowCycles: number;
+  playbackStartedAt: number | null; // Timestamp when session playback started (null = paused)
 };
 
 type Participant = {
@@ -271,6 +272,7 @@ function HomeContent() {
     version: 0,
     creatorId: null,
     windowCycles: 4,
+    playbackStartedAt: null,
   });
   const sessionStateRef = useRef(sessionState);
   const [draftInstrument, setDraftInstrument] = useState<Instrument>("drums");
@@ -315,6 +317,7 @@ function HomeContent() {
   
   const [replaceTarget, setReplaceTarget] = useState<string | null>(null);
   const [audioReady, setAudioReady] = useState(false);
+  const [isMuted, setIsMuted] = useState(false); // Per-user mute (transport still runs, just no sound)
   const [currentStep, setCurrentStep] = useState(0);
   const [turnRemaining, setTurnRemaining] = useState(0);
   const [stateLoaded, setStateLoaded] = useState(false);
@@ -323,6 +326,7 @@ function HomeContent() {
   const ablyRef = useRef<Ably.Realtime | null>(null);
   const channelRef = useRef<Ably.RealtimeChannel | null>(null);
   const transportStarted = useRef(false);
+  const isMutedRef = useRef(false);
   const synthsRef = useRef<{
     drums?: {
       kick: Tone.MembraneSynth;
@@ -382,6 +386,10 @@ function HomeContent() {
     identityRef.current = identity;
   }, [identity]);
 
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
   const queue = useMemo(() => queueFromPresence(participants), [participants]);
   const isLeader = queue[0]?.id === identity.id;
   const isMyTurn = sessionState.activeTurn?.userId === identity.id;
@@ -401,6 +409,9 @@ function HomeContent() {
   }
 
   function triggerSynth(instrument: Instrument, note: Note, time: number) {
+    // Respect user's personal mute setting
+    if (isMutedRef.current) return;
+    
     const synths = synthsRef.current;
     if (!synths) return;
     if (instrument === "drums" && synths.drums) {
@@ -563,6 +574,7 @@ function HomeContent() {
       version: now,
       creatorId: identityRef.current.id,
       windowCycles: sessionStateRef.current.windowCycles,
+      playbackStartedAt: now, // Start playing immediately when session is created
     };
     publishState(initial);
     setStateLoaded(true);
@@ -823,6 +835,39 @@ function HomeContent() {
     };
   }, []);
 
+  // Calculate loop duration in seconds
+  const getLoopDuration = (bpm: number) => {
+    return (60 / bpm) * STEP_COUNT; // 16 steps, each is a quarter note
+  };
+
+  // Sync local transport to session playback
+  const syncTransportToSession = () => {
+    const state = sessionStateRef.current;
+    if (!state.playbackStartedAt) {
+      // Session not playing - stop transport
+      if (transportStarted.current) {
+        Tone.Transport.pause();
+      }
+      return;
+    }
+    
+    // Calculate where in the loop we should be
+    const now = Date.now();
+    const elapsedMs = now - state.playbackStartedAt;
+    const loopDuration = getLoopDuration(state.bpm);
+    const elapsedSeconds = elapsedMs / 1000;
+    
+    // Position within the current loop (modulo loop length)
+    const positionInLoop = elapsedSeconds % loopDuration;
+    
+    // Set transport position and ensure it's running
+    Tone.Transport.seconds = positionInLoop;
+    if (!transportStarted.current || Tone.Transport.state !== "started") {
+      Tone.Transport.start();
+      transportStarted.current = true;
+    }
+  };
+
   const enableAudio = async () => {
     if (audioReady) return;
     await Tone.start();
@@ -830,19 +875,61 @@ function HomeContent() {
     Tone.getContext().lookAhead = 0.005;
     Tone.Destination.volume.value = -4;
     Tone.Transport.bpm.value = sessionStateRef.current.bpm;
-    if (!transportStarted.current) {
-      Tone.Transport.start();
-      transportStarted.current = true;
-    }
     
     createSynths(drumKit, keysSound, bassSound, keysParams, bassParams, drumParams);
     setAudioReady(true);
+    
+    // Sync to session playback if already playing
+    syncTransportToSession();
+  };
+
+  // Toggle session-wide playback (only leader/creator can control)
+  const toggleSessionPlayback = () => {
+    if (!channelRef.current) return;
+    
+    const now = Date.now();
+    const isPlaying = sessionStateRef.current.playbackStartedAt !== null;
+    
+    publishState({
+      ...sessionStateRef.current,
+      playbackStartedAt: isPlaying ? null : now,
+      version: now,
+    });
   };
 
   useEffect(() => {
     if (!audioReady) return;
     Tone.Transport.bpm.rampTo(sessionState.bpm, 0.2);
-  }, [audioReady, sessionState.bpm]);
+    // Re-sync after BPM change to maintain alignment
+    if (sessionState.playbackStartedAt) {
+      // Small delay to let BPM ramp take effect
+      const timeout = setTimeout(() => syncTransportToSession(), 250);
+      return () => clearTimeout(timeout);
+    }
+  }, [audioReady, sessionState.bpm, sessionState.playbackStartedAt]);
+
+  // Sync transport when session playback state changes
+  useEffect(() => {
+    if (!audioReady) return;
+    syncTransportToSession();
+  }, [audioReady, sessionState.playbackStartedAt]);
+
+  // Periodic re-sync to handle clock drift between users
+  useEffect(() => {
+    if (!audioReady || !sessionState.playbackStartedAt) return;
+    
+    // Re-sync every 8 bars (2 full loops) to keep users aligned
+    const loopDuration = getLoopDuration(sessionState.bpm);
+    const resyncInterval = loopDuration * 2 * 1000; // Every 2 loops in ms
+    
+    const interval = setInterval(() => {
+      if (sessionStateRef.current.playbackStartedAt) {
+        syncTransportToSession();
+      }
+    }, resyncInterval);
+    
+    return () => clearInterval(interval);
+  }, [audioReady, sessionState.playbackStartedAt, sessionState.bpm]);
 
   // Recreate synths when sound type changes
   useEffect(() => {
@@ -1162,15 +1249,52 @@ function HomeContent() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                onClick={enableAudio}
-                className={clsx(
-                  "pill bg-[#4f7bff] px-3 py-1.5 text-xs font-semibold text-white shadow transition",
-                  audioReady ? "opacity-90" : "animate-pulse"
-                )}
-              >
-                {audioReady ? "▶ Playing" : "▶ Start"}
-              </button>
+              {!audioReady ? (
+                <button
+                  onClick={enableAudio}
+                  className="pill bg-[#4f7bff] px-3 py-1.5 text-xs font-semibold text-white shadow transition animate-pulse"
+                >
+                  🔊 Enable Audio
+                </button>
+              ) : (
+                <>
+                  {/* Session-wide play/pause (leader/creator only) */}
+                  {(sessionState.creatorId === identity.id || isLeader) && (
+                    <button
+                      onClick={toggleSessionPlayback}
+                      className={clsx(
+                        "pill px-3 py-1.5 text-xs font-semibold shadow transition",
+                        sessionState.playbackStartedAt
+                          ? "bg-[#ff5e6c] text-white"
+                          : "bg-[#6ef3b7] text-neutral-900"
+                      )}
+                    >
+                      {sessionState.playbackStartedAt ? "⏸ Pause All" : "▶ Play All"}
+                    </button>
+                  )}
+                  {/* Personal mute toggle */}
+                  <button
+                    onClick={() => setIsMuted(!isMuted)}
+                    className={clsx(
+                      "pill px-3 py-1.5 text-xs font-semibold shadow transition",
+                      isMuted
+                        ? "bg-neutral-300 text-neutral-600"
+                        : "bg-[#4f7bff] text-white"
+                    )}
+                  >
+                    {isMuted ? "🔇 Muted" : "🔊 Sound On"}
+                  </button>
+                  {/* Sync status indicator */}
+                  <div className={clsx(
+                    "pill px-2 py-1.5 text-[10px] font-semibold",
+                    sessionState.playbackStartedAt
+                      ? "bg-[#6ef3b7]/30 text-[#0a5c36]"
+                      : "bg-neutral-200 text-neutral-500"
+                  )}>
+                    {sessionState.playbackStartedAt ? "● Synced" : "○ Paused"}
+                  </div>
+                </>
+              )}
               <div className="pill bg-white px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-700">
                 {sessionId}
               </div>
@@ -1464,8 +1588,11 @@ function HomeContent() {
                           min={100}
                           max={12000}
                           onChange={(v) => {
-                            const setter = draftInstrument === "keys" ? setKeysParams : setBassParams;
-                            setter(p => ({ ...p, filterFreq: v }));
+                            if (draftInstrument === "keys") {
+                              setKeysParams(p => ({ ...p, filterFreq: v }));
+                            } else {
+                              setBassParams(p => ({ ...p, filterFreq: v }));
+                            }
                           }}
                           label="Filter"
                           displayValue={
@@ -1480,8 +1607,11 @@ function HomeContent() {
                           min={0.5}
                           max={15}
                           onChange={(v) => {
-                            const setter = draftInstrument === "keys" ? setKeysParams : setBassParams;
-                            setter(p => ({ ...p, filterRes: v }));
+                            if (draftInstrument === "keys") {
+                              setKeysParams(p => ({ ...p, filterRes: v }));
+                            } else {
+                              setBassParams(p => ({ ...p, filterRes: v }));
+                            }
                           }}
                           label="Res"
                           displayValue={(draftInstrument === "keys" ? keysParams : bassParams).filterRes.toFixed(1)}
@@ -1506,8 +1636,11 @@ function HomeContent() {
                         sustain={(draftInstrument === "keys" ? keysParams : bassParams).sustain}
                         release={(draftInstrument === "keys" ? keysParams : bassParams).release}
                         onChange={(params) => {
-                          const setter = draftInstrument === "keys" ? setKeysParams : setBassParams;
-                          setter(p => ({ ...p, ...params }));
+                          if (draftInstrument === "keys") {
+                            setKeysParams(p => ({ ...p, ...params }));
+                          } else {
+                            setBassParams(p => ({ ...p, ...params }));
+                          }
                         }}
                         accent={draftInstrument === "keys" ? "#45d4e5" : "#ff5e6c"}
                         maxAttack={1}
@@ -1521,7 +1654,16 @@ function HomeContent() {
                 <div className="mt-2 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 text-[10px] text-neutral-500">
                     <span className="mono">Step {currentStep + 1}/{STEP_COUNT}</span>
-                    <span className="pill bg-neutral-100 px-2 py-0.5 text-[9px] font-semibold">{audioReady ? "Synced" : "Muted"}</span>
+                    <span className={clsx(
+                      "pill px-2 py-0.5 text-[9px] font-semibold",
+                      !audioReady ? "bg-neutral-100" :
+                      !sessionState.playbackStartedAt ? "bg-neutral-200" :
+                      isMuted ? "bg-[#ffb300]/30" : "bg-[#6ef3b7]/50"
+                    )}>
+                      {!audioReady ? "Audio Off" :
+                       !sessionState.playbackStartedAt ? "Session Paused" :
+                       isMuted ? "Your Sound Muted" : "Playing Synced"}
+                    </span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <button
