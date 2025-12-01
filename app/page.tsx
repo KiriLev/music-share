@@ -1229,6 +1229,21 @@ function HomeContent() {
     replaceTarget,
   ]);
 
+  // Delete a loop (session leader only)
+  const deleteLoop = useCallback((loopId: string) => {
+    const canDelete = sessionState.creatorId === identity.id || isLeader;
+    if (!canDelete) return;
+    
+    const now = Date.now();
+    const updatedLoops = sessionStateRef.current.loops.filter((l) => l.id !== loopId);
+    
+    publishState({
+      ...sessionStateRef.current,
+      loops: updatedLoops,
+      version: now,
+    });
+  }, [sessionState.creatorId, identity.id, isLeader]);
+
   const nowPlayingLabel = () => {
     if (!sessionState.activeTurn) return "Waiting";
     const active = queue.find((p) => p.id === sessionState.activeTurn?.userId);
@@ -1732,36 +1747,48 @@ function HomeContent() {
                 <span className="pill bg-white px-2 py-0.5 text-[10px] font-semibold text-neutral-700">{sessionState.loops.length} loops</span>
               </div>
               <div className="mt-2 grid gap-2 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {sessionState.loops.map((loop) => (
-                  <div
-                    key={loop.id}
-                    className="relative overflow-hidden rounded-md border-2 border-neutral-900 bg-white p-2"
-                  >
+                {sessionState.loops.map((loop) => {
+                  const canDelete = sessionState.creatorId === identity.id || isLeader;
+                  return (
                     <div
-                      className="absolute inset-0 opacity-20"
-                      style={{ background: `linear-gradient(135deg, ${loop.userColor}, transparent)` }}
-                    />
-                    <div className="relative flex items-center gap-1.5">
-                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: loop.userColor }} />
-                      <span className="text-[10px] font-semibold truncate">{loop.userName}</span>
-                      <span className="text-[9px] uppercase text-neutral-500">{INSTRUMENT_LABEL[loop.instrument]}</span>
+                      key={loop.id}
+                      className="group relative overflow-hidden rounded-md border-2 border-neutral-900 bg-white p-2"
+                    >
+                      <div
+                        className="absolute inset-0 opacity-20"
+                        style={{ background: `linear-gradient(135deg, ${loop.userColor}, transparent)` }}
+                      />
+                      <div className="relative flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: loop.userColor }} />
+                        <span className="text-[10px] font-semibold truncate flex-1">{loop.userName}</span>
+                        <span className="text-[9px] uppercase text-neutral-500">{INSTRUMENT_LABEL[loop.instrument]}</span>
+                        {canDelete && (
+                          <button
+                            onClick={() => deleteLoop(loop.id)}
+                            className="ml-1 h-4 w-4 flex items-center justify-center rounded bg-[#ff5e6c]/0 hover:bg-[#ff5e6c] text-[#ff5e6c] hover:text-white text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-all"
+                            title="Delete loop"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative mt-1.5 flex items-center gap-0.5">
+                        {stepSquares.map((_, idx) => {
+                          const hasNote = loop.notes.some((n) => n.step === idx);
+                          return (
+                            <div
+                              key={idx}
+                              className={clsx(
+                                "h-2 flex-1 rounded-sm",
+                                hasNote ? "bg-neutral-900" : "bg-neutral-200"
+                              )}
+                            />
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div className="relative mt-1.5 flex items-center gap-0.5">
-                      {stepSquares.map((_, idx) => {
-                        const hasNote = loop.notes.some((n) => n.step === idx);
-                        return (
-                          <div
-                            key={idx}
-                            className={clsx(
-                              "h-2 flex-1 rounded-sm",
-                              hasNote ? "bg-neutral-900" : "bg-neutral-200"
-                            )}
-                          />
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {sessionState.loops.length === 0 && (
                   <div className="col-span-full rounded-md border-2 border-dashed border-neutral-300 bg-neutral-50 p-3 text-[10px] text-neutral-500 text-center">
                     No loops yet — be the first!
